@@ -12,6 +12,30 @@ Streamlit-based RAG app for performance review analysis using Gemini, FAISS, and
 
 ## Run Locally
 
+### Git Bash
+
+```bash
+git clone https://github.com/nisarga-digital/Rag_Python_AI.git
+cd Rag_Python_AI
+
+python -m venv .venv
+source .venv/Scripts/activate
+
+pip install -r requirements.txt
+echo "GEMINI_API_KEY=your_key_here" > .env
+
+streamlit run rag/app.py
+```
+
+If `python` does not work in Git Bash, try `py`:
+
+```bash
+py -m venv .venv
+source .venv/Scripts/activate
+```
+
+### PowerShell
+
 1. Create a `.env` file with `GEMINI_API_KEY=your_key_here`
 2. Install dependencies:
 
