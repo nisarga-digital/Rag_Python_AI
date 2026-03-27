@@ -1,15 +1,22 @@
 import os
+import re
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 
 from performance_review_backend import (
+    GLOBAL_SESSION,
     load_pdf,
     load_csv,
     csv_to_dataframe,
     build_or_merge_vectorstore,
+    load_full_history,
+    load_memory_for_llm,
+    load_vectorstore,
     run_query,
+    save_vectorstore,
+    reset_vectorstore,
     clear_memory,
     build_export_row,
     export_to_csv_bytes,
@@ -26,6 +33,45 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+def _looks_like_markdown_table(block: str) -> bool:
+    lines = [line.rstrip() for line in block.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    if "|" not in lines[0]:
+        return False
+    return bool(re.match(r"^\s*\|?[\s:-]+\|[\s|:-]*\|?\s*$", lines[1]))
+
+
+def _markdown_table_to_dataframe(block: str) -> pd.DataFrame | None:
+    lines = [line.strip() for line in block.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+
+    def parse_row(line: str) -> list[str]:
+        line = line.strip().strip("|")
+        return [cell.strip() for cell in line.split("|")]
+
+    headers = parse_row(lines[0])
+    rows = [parse_row(line) for line in lines[2:]]
+    rows = [row for row in rows if len(row) == len(headers)]
+    if not headers:
+        return None
+    return pd.DataFrame(rows, columns=headers)
+
+
+def _render_assistant_content(content: str) -> None:
+    blocks = re.split(r"\n\s*\n", content.strip())
+    for block in blocks:
+        if not block.strip():
+            continue
+        if _looks_like_markdown_table(block):
+            df = _markdown_table_to_dataframe(block)
+            if df is not None:
+                st.table(df)
+                continue
+        st.markdown(block)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PREMIUM CSS
@@ -667,10 +713,26 @@ SESSION_DEFAULTS = {
     "lc_memory":    [],
     "qa_export":    [],
     "csv_df":       None,
+    "vectorstore_bootstrap_key": None,
+    "chat_bootstrapped": False,
 }
 for k, v in SESSION_DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+if not st.session_state.chat_bootstrapped:
+    stored_history = load_full_history(GLOBAL_SESSION)
+    if stored_history:
+        st.session_state.chat_history = [
+            {
+                "role": "user" if row["role"] == "human" else "ai",
+                "content": row["content"],
+                "ts": datetime.fromisoformat(row["timestamp"]).strftime("%H:%M:%S"),
+            }
+            for row in stored_history
+        ]
+        st.session_state.lc_memory = load_memory_for_llm(GLOBAL_SESSION)
+    st.session_state.chat_bootstrapped = True
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SAMPLE QUESTIONS
@@ -716,6 +778,17 @@ with st.sidebar:
         placeholder="AIza...",
         label_visibility="visible",
     )
+
+    if api_key and st.session_state.vectorstore_bootstrap_key != api_key:
+        try:
+            saved_vectorstore, saved_sources = load_vectorstore(api_key)
+            if saved_vectorstore is not None:
+                st.session_state.vectorstore = saved_vectorstore
+                st.session_state.doc_sources = saved_sources
+        except Exception:
+            pass
+        finally:
+            st.session_state.vectorstore_bootstrap_key = api_key
 
     st.markdown('<div class="sb-section">Documents</div>', unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
@@ -763,6 +836,10 @@ with st.sidebar:
                     st.session_state.doc_sources.append(
                         {"name": uf.name, "type": dtype, "chunks": len(docs), "pages": n}
                     )
+                    save_vectorstore(
+                        st.session_state.vectorstore,
+                        st.session_state.doc_sources,
+                    )
                     st.sidebar.success(f"✅ {uf.name} — {len(docs)} chunks")
                 except Exception as e:
                     st.sidebar.error(f"❌ {uf.name}: {e}")
@@ -796,6 +873,7 @@ with st.sidebar:
         if st.button("↺ Reset All", use_container_width=True):
             for k, v in SESSION_DEFAULTS.items():
                 st.session_state[k] = v
+            reset_vectorstore()
             st.cache_resource.clear()
             st.rerun()
 
@@ -871,7 +949,6 @@ with tab_chat:
                 </div>""", unsafe_allow_html=True)
             else:
                 elapsed = msg.get("elapsed", "?")
-                answer_html = msg["content"].replace("\n", "<br/>")
                 st.markdown(f"""
                 <div class="bubble-ai">
                     <div class="bubble-ai-inner">
@@ -880,9 +957,9 @@ with tab_chat:
                             <span class="ai-time">{ts}</span>
                             <span class="ai-speed">⚡ {elapsed}s</span>
                         </div>
-                        <div class="ai-body">{answer_html}</div>
                     </div>
                 </div>""", unsafe_allow_html=True)
+                _render_assistant_content(msg["content"])
 
                 sources = msg.get("sources", [])
                 if sources:
